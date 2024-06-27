@@ -44,10 +44,58 @@ static_targets <- tar_plan(
   # ecmwf = 1; 
   # sentinel ndvi = 0.01
   # modis ndvi = 0.01
-  tar_target(rsa_polygon, rgeoboundaries::geoboundaries("South Africa", "adm2"))
+  tar_target(rsa_polygon, rgeoboundaries::geoboundaries("South Africa", "adm2")),
   
-)
 
+  # SOIL -----------------------------------------------------------
+  tar_target(soil_directory_raw, 
+             create_data_directory(directory_path = "data/soil")),
+  tar_target(soil_downloaded, soil_download(soil_directory_raw),
+             format = "file", 
+             repository = "local"),
+  tar_target(soil_directory_dataset, 
+             create_data_directory(directory_path = "data/soil_dataset")),
+  tar_target(soil_preprocessed, 
+             preprocess_soil(soil_directory_dataset, soil_directory_raw, continent_raster_template, soil_downloaded)),
+  
+  # SLOPE and ASPECT -------------------------------------------------
+  tar_target(slope_aspect_directory_raw, 
+             create_data_directory(directory_path = "data/slope_aspect")),
+  tar_target(slope_aspect_directory_dataset, 
+             create_data_directory(directory_path = "data/slope_aspect_dataset")),
+  tar_target(slope_aspect_downloaded, get_slope_aspect(slope_aspect_directory_dataset, slope_aspect_directory_raw, continent_raster_template),
+    format = "file", 
+    repository = "local"),
+ 
+   # Gridded Livestock of the world -----------------------------------------------------------
+  tar_target(glw_directory_raw, 
+             create_data_directory(directory_path = "data/glw")),
+  tar_target(glw_downloaded, get_glw_data(glw_directory_raw),
+             format = "file", 
+             repository = "local"),
+  tar_target(glw_directory_dataset, 
+             create_data_directory(directory_path = "data/glw_dataset")),
+  tar_target(glw_preprocessed, 
+             preprocess_glw_data(glw_directory_dataset, glw_directory_raw, glw_downloaded, continent_raster_template)),
+
+
+# ELEVATION -----------------------------------------------------------
+tar_target(elevation_directory_raw, 
+           create_data_directory(directory_path = "data/elevation")),
+tar_target(elevation_downloaded, get_elevation(elevation_directory_raw, overwrite = FALSE),
+  format = "file", 
+  repository = "local"),
+tar_target(elevation_directory_dataset, 
+           create_data_directory(directory_path = "data/elevation_dataset")),
+tar_target(elevation_preprocessed, 
+           process_elevation(elevation_directory_dataset, elevation_downloaded, elevation_directory_raw, continent_raster_template)),
+
+# Any missing static layers?
+# bioclim
+# forest cover
+#
+
+)
 # Dynamic Data Download -----------------------------------------------------------
 dynamic_targets <- tar_plan(
   
@@ -56,10 +104,16 @@ dynamic_targets <- tar_plan(
   tar_target(wahis_rvf_outbreaks_preprocessed, 
              preprocess_wahis_rvf_outbreaks(wahis_rvf_outbreaks_raw)),
   
+  tar_target(wahis_outbreak_history, calc_outbreak_history(wahis_rvf_outbreaks_preprocessed,
+                                                           continent_raster_template,
+                                                           continent_polygon,
+                                                           country_polygons)),
+  
   tar_target(wahis_rvf_controls_raw, get_wahis_rvf_controls_raw()),
   tar_target(wahis_rvf_controls_preprocessed, 
              preprocess_wahis_rvf_controls(wahis_rvf_controls_raw)),
-  
+
+
   # SENTINEL NDVI -----------------------------------------------------------
   # 2018-present
   # 10 day period
@@ -304,7 +358,21 @@ dynamic_targets <- tar_plan(
                                 show_progress = TRUE),
              pattern = ecmwf_forecasts_transformed,
              cue = tar_cue(tar_cue_upload_aws)), # only run this if you need to upload new data 
+
   
+
+  # cache locally
+  # Note the tar_read. When using AWS this does not read into R but instead initiates a download of the file into the scratch folder for later processing.
+  # Format file here means if we delete or change the local cache it will force a re-download.
+  tar_target(nasa_recorded_weather_local, {suppressWarnings(dir.create(here::here("data/nasa_parquets"), recursive = TRUE))
+    cache_aws_branched_target(tmp_path = tar_read(nasa_recorded_weather_download),
+                              ext = ".gz.parquet") 
+  },
+  repository = "local", 
+  format = "file"
+  ),
+
+
 )
 
 # Data Processing -----------------------------------------------------------
