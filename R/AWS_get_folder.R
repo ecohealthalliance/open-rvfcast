@@ -378,29 +378,63 @@ AWS_put_files <- function(transformed_file_list,
   # Walk through transformed_file_list (can be a single file or vector of files)
   for (file in transformed_file_list) {
 
-    # Get dataset object
-    remote_dataset <- error_safe_open_dataset(paste0(Sys.getenv("AWS_BUCKET_ID"), "/", file), fs = s3_fs)
-    local_dataset  <- error_safe_open_dataset(file)
+    # Arrow can only introspect parquet-family files, so only run the
+    # schema/row-count comparison for those; other formats (e.g. .qs) always
+    # failed this open and produced misleading "Parquet magic bytes not
+    # found" errors even though the upload itself was unaffected
+    is_parquet_file <- grepl("\\.parquet$", file, ignore.case = TRUE)
 
-    if (is.null(remote_dataset) || !remote_dataset$schema$Equals(local_dataset$schema) || remote_dataset$num_rows != local_dataset$num_rows || overwrite == TRUE) {
+    if (is_parquet_file) {
+      # Get dataset object
+      remote_dataset <- error_safe_open_dataset(paste0(Sys.getenv("AWS_BUCKET_ID"), "/", file), fs = s3_fs)
+      local_dataset  <- error_safe_open_dataset(file)
 
-      # Put the file on S3 using aws.s3
-      upload_result <- aws.s3::put_object(
-        file = file,
-        object = file,
-        multipart = TRUE,
-        part_size = 10485760,
+      needs_upload <- is.null(remote_dataset) || !remote_dataset$schema$Equals(local_dataset$schema) || remote_dataset$num_rows != local_dataset$num_rows || overwrite == TRUE
+      already_matches_outcome <- glue::glue("{basename(file)} already exists on AWS with matching rows and schema and overwrite is not TRUE, skipping upload")
+    } else {
+      # For non-parquet formats, fall back to a remote existence/size check
+      # (the same one used to verify uploads below) instead of an arrow
+      # schema comparison, since arrow cannot open these formats at all
+      needs_upload <- overwrite == TRUE || !verify_remote_upload(file = file, bucket = Sys.getenv("AWS_BUCKET_ID"), region = aws_region)
+      already_matches_outcome <- glue::glue("{basename(file)} already exists on AWS with matching size and overwrite is not TRUE, skipping upload")
+    }
+
+    if (needs_upload) {
+
+      # Put the file on S3 using aws.s3. Its boolean return value is not used to
+      # judge success (see verify_remote_upload below) because it is unreliable
+      # on S3-compatible endpoints like Cloudflare R2. A genuine server-side
+      # failure (e.g. a transient 5xx) makes put_object throw rather than
+      # return FALSE, so that is caught here too, letting the loop move on to
+      # the next file instead of halting the whole upload run.
+      tryCatch(
+        aws.s3::put_object(
+          file = file,
+          object = file,
+          multipart = TRUE,
+          part_size = 10485760,
+          bucket = Sys.getenv("AWS_BUCKET_ID"),
+          region = aws_region
+        ),
+        error = function(e) cat("Error uploading file:", file, "\nError message:", e$message, "\n")
+      )
+
+      # Independently confirm the upload landed instead of trusting put_object's
+      # return value, which some S3-compatible endpoints (e.g. Cloudflare R2)
+      # can cause aws.s3 to misreport as FALSE even when the PUT succeeded.
+      upload_verified <- verify_remote_upload(
+        file   = file,
         bucket = Sys.getenv("AWS_BUCKET_ID"),
         region = aws_region
       )
 
-      if (upload_result) {
+      if (upload_verified) {
         outcome <- glue::glue("Successfully uploaded {basename(file)} to AWS")
       } else {
         outcome <- glue::glue("Failed to upload {basename(file)} to AWS")
       }
     } else {
-      outcome <- glue::glue("{basename(file)} already exists on AWS with matching rows and schema and overwrite is not TRUE, skipping upload")
+      outcome <- already_matches_outcome
     }
 
     message(outcome)
@@ -408,4 +442,46 @@ AWS_put_files <- function(transformed_file_list,
   }
 
   outcomes
+}
+
+
+#' Verify a File Was Actually Uploaded to AWS S3
+#'
+#' Confirms an upload succeeded by checking the bucket directly (via a HEAD
+#' request) rather than trusting the return value of \code{aws.s3::put_object}.
+#' On S3-compatible endpoints such as Cloudflare R2, \code{put_object} can
+#' return \code{FALSE} even when the object was written correctly, because it
+#' treats any non-empty PUT response body as a failure signal, an assumption
+#' that only holds for AWS's own S3. This function instead checks that the
+#' object exists remotely and that its size matches the local file. It is
+#' also reused by \code{AWS_put_files} as a pre-upload check, in place of an
+#' arrow schema comparison, for file formats arrow cannot open (e.g. .qs).
+#'
+#' @param file String giving the path (S3 key and local path, which mirror
+#'   each other in this project) of the file to verify.
+#' @param bucket String giving the S3 bucket name.
+#' @param region String giving the AWS region (may be \code{""} for
+#'   S3-compatible endpoints that ignore region).
+#'
+#' @return Logical. \code{TRUE} if the object exists remotely with a size
+#'   matching the local file, \code{FALSE} otherwise.
+verify_remote_upload <- function(file, bucket, region) {
+
+  # HEAD the object rather than downloading it, and treat any error (e.g.
+  # network hiccup, object not found) as a verification failure. A missing
+  # object is an entirely expected outcome here (e.g. a first-time upload),
+  # so the informational message aws.s3 prints for a 404 is suppressed.
+  head_result <- suppressMessages(tryCatch(
+    aws.s3::head_object(object = file, bucket = bucket, region = region),
+    error = function(e) FALSE
+  ))
+
+  if (!isTRUE(head_result)) return(FALSE)
+
+  # Compare remote and local sizes; the Content-Length header comes back on
+  # head_result as a character attribute so it needs coercing to numeric
+  remote_size <- suppressWarnings(as.numeric(attr(head_result, "content-length")))
+  local_size  <- file.size(file)
+
+  isTRUE(!is.na(remote_size) && remote_size == local_size)
 }

@@ -885,6 +885,24 @@ model_evaluation_targets <- tar_plan(
   , plotname  = "map_split"
   , overwrite = TRUE))
 
+  ## Further / tidied prediction diagnostics into a single output. 
+   ## Includes scoring, calibration, spatial, ENSO coupling, temporal dynamics, 
+   ## variable importance/SHAP, tree structure.
+, tar_target(comprehensive_diagnostics_out_dir
+             , paste0("outputs/fit_evaluation/comprehensive_diagnostics_", Sys.Date()))
+
+  ## Run the more extensive fit diagnostics and save to another file
+, tar_target(comprehensive_diagnostics, run_comprehensive_fit_diagnostics(
+    predictions_path   = ex_fits.all_probs_raw
+  , test_data          = test_data
+  , fitted_model       = fitted_model
+  , region_hexes       = region_hexes
+  , performance_hexes  = performance_hexes
+  , out_dir            = comprehensive_diagnostics_out_dir
+  , chosen_purpose_tag = if (purpose == "train") "for_test_data" else "for_forecasting")
+  , error              = "null"
+  , format             = "file")
+
   ## target to ensure dependency for the new batch of fit evaluation files for upload
 , tar_target(completed_fit_evaluation, {
    invisible(ex_fits.all_probs_raw)
@@ -897,6 +915,7 @@ model_evaluation_targets <- tar_plan(
    invisible(plotted_calibration.plot_export_even)
    invisible(prob_dens.plot_export)
    invisible(map_split.plot_export)
+   invisible(comprehensive_diagnostics)
   })
 
 )
@@ -927,6 +946,7 @@ recent outbreak layers")
 , tar_target(new_performance_files_to_uplaod, {
     invisible(completed_fit_evaluation)
     invisible(openrvfcast_performance_tracking)
+    invisible(comprehensive_diagnostics)
     outpath   <- "outputs/fit_evaluation"
     filenames <- list.files(outpath)
     filenames <- filenames[grep(Sys.Date(), filenames)]
